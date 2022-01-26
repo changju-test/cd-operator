@@ -17,9 +17,10 @@ func init() {
 // DeployResourceSpec is a spec of deployed application's resource
 type DeployResourceSpec struct {
 	//name kind namespace, status
-	Name      string `json:"name"`
-	Kind      string `json:"kind"`
-	Namespace string `json:"namespace"`
+	Name       string `json:"name"`
+	Namespace  string `json:"namespace"`
+	APIVersion string `json:"apiVersion"`
+	Kind       string `json:"kind"`
 }
 
 // +kubebuilder:object:root=true
@@ -35,7 +36,7 @@ type DeployResource struct {
 
 // +kubebuilder:object:root=true
 
-// DeployResourceList contains the list of ArgoResources
+// DeployResourceList contains the list of DeployResources
 type DeployResourceList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`

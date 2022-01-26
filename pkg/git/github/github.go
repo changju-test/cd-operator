@@ -26,7 +26,10 @@ import (
 	"strings"
 
 	"github.com/tmax-cloud/cd-operator/pkg/git"
+	"github.com/tmax-cloud/cd-operator/pkg/manifestmanager/utils"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/yaml"
 )
 
 // Client is a gitlab client struct
@@ -408,6 +411,76 @@ func (c *Client) GetBranch(branch string) (*git.Branch, error) {
 	}
 
 	return &git.Branch{Name: resp.Name, CommitID: resp.Commit.Sha}, nil
+}
+
+// GetManifestInfos gets info to download manifests
+func (c *Client) GetManifestInfos(path, revision string, manifestInfos []string) ([]string, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/contents/%s?ref=%s", c.GitAPIURL, c.GitRepository, path, revision)
+
+	raw, _, err := c.requestHTTP(http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var contents []ContentResponse
+	var content ContentResponse
+
+	if err := json.Unmarshal(raw, &contents); err != nil {
+		if err := json.Unmarshal(raw, &content); err != nil {
+			return nil, err
+		}
+		contents = append(contents, content)
+	}
+
+	for _, content = range contents {
+		switch content.Type {
+		case string(ContentTypeFile):
+			manifestInfos = append(manifestInfos, content.DownloadURL)
+		case string(ContentTypeDir):
+			manifestInfos, err = c.GetManifestInfos(content.Path, revision, manifestInfos)
+			if err != nil {
+				return nil, err
+			}
+		default:
+		}
+	}
+	return manifestInfos, nil
+}
+
+// ObjectFromManifest returns unstructured objects from a raw manifest file
+func (c *Client) ObjectFromManifest(info, namespace string) ([]*unstructured.Unstructured, error) {
+	var manifestRawObjs []*unstructured.Unstructured
+
+	raw, _, err := c.requestHTTP(http.MethodGet, info, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	stringYAMLManifests := utils.SplitMultipleObjectsYAML(raw)
+
+	for _, stringYAMLManifest := range stringYAMLManifests {
+		byteYAMLManifest := []byte(stringYAMLManifest)
+
+		bytes, err := yaml.YAMLToJSON(byteYAMLManifest)
+		if err != nil {
+			return nil, err
+		}
+
+		if string(bytes) == "null" {
+			continue
+		}
+
+		manifestRawObj, err := utils.BytesToUnstructuredObject(bytes)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(manifestRawObj.GetNamespace()) == 0 {
+			manifestRawObj.SetNamespace(namespace)
+		}
+		manifestRawObjs = append(manifestRawObjs, manifestRawObj)
+	}
+	return manifestRawObjs, nil
 }
 
 func convertPullRequestToShared(pr *PullRequest) *git.PullRequest {

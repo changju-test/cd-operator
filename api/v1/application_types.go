@@ -19,7 +19,7 @@ package v1
 import (
 	"context"
 
-	"github.com/operator-framework/operator-lib/status"
+	"github.com/tmax-cloud/cd-operator/internal/configs"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -29,15 +29,17 @@ import (
 	"net/url"
 )
 
-// ApplicationKind is kind string
 const (
+	// ApplicationKind is kind string
 	ApplicationKind = "Applications"
+	// APIKindApplication is application's api kind string
+	APIKindApplication = "applications"
 )
 
-// Condition keys for IApplication
+// Condition keys for Application
 const (
-	ApplicationConditionReady             = status.ConditionType("ready")
-	ApplicationConditionWebhookRegistered = status.ConditionType("webhook-registered")
+	ApplicationConditionReady             = "ready"
+	ApplicationConditionWebhookRegistered = "webhook-registered"
 )
 
 // ApplicationConditionReasonNoGitToken is a Reason key
@@ -45,19 +47,52 @@ const (
 	ApplicationConditionReasonNoGitToken = "noGitToken"
 )
 
+// SyncStatusCode is a type which represents possible comparison results
+type SyncStatusCode string
+
+// Possible comparison results
+const (
+	// SyncStatusCodeUnknown indicates that the status of a sync could not be reliably determined
+	SyncStatusCodeUnknown SyncStatusCode = "Unknown"
+	// SyncStatusCodeOutOfSync indicates that desired and live states match
+	SyncStatusCodeSynced SyncStatusCode = "Synced"
+	// SyncStatusCodeOutOfSync indicates that there is a drift between desired and live states
+	SyncStatusCodeOutOfSync SyncStatusCode = "OutOfSync"
+)
+
+// SyncPolicy controls when a sync will be performed in response to updates in git
+type SyncPolicy struct {
+	// AutoSync will keep an application synced to the target revision if it is set true
+	AutoSync bool `json:"autosync,omitempty"`
+	// SyncCheckPeriod is period to check sync in sec
+	SyncCheckPeriod int64 `json:"syncCheckPeriod,omitempty"`
+}
+
+// SyncStatus contains information about the currently observed live and desired states of an application
+type SyncStatus struct {
+	// Status is the sync state of the comparison
+	Status SyncStatusCode `json:"status,omitempty"`
+	// TimeCheck is time after last sync in second
+	TimeCheck int64 `json:"timeCheck,omitempty"`
+}
+
 // ApplicationSpec defines the desired state of Application
 type ApplicationSpec struct {
 	// Source is a reference to the location of the application's manifests or chart
 	Source ApplicationSource `json:"source"`
 	// Destination is a reference to the target Kubernetes server and namespace
 	Destination ApplicationDestination `json:"destination"`
+	// SyncPolicy controls when and how a sync will be performed
+	SyncPolicy SyncPolicy `json:"syncPolicy,omitempty"`
 }
 
 // ApplicationStatus defines the observed state of Application
 type ApplicationStatus struct {
-	// Conditions of IntegrationConfig
-	Conditions status.Conditions `json:"conditions"`
-	Secrets    string            `json:"secrets,omitempty"` // TODO 왜 필요해?
+	// SyncStatus contains information about the application's current sync status
+	Sync SyncStatus `json:"sync,omitempty"`
+	// Conditions of Application
+	Conditions []metav1.Condition `json:"conditions"`
+	Secrets    string             `json:"secrets,omitempty"`
 }
 
 //+kubebuilder:object:root=true
@@ -90,6 +125,11 @@ type ApplicationSource struct {
 	// In case of Git, this can be commit, tag, or branch. If omitted, will equal to HEAD.
 	// In case of Helm, this is a semver tag for the Chart's version.
 	TargetRevision string `json:"targetRevision,omitempty"`
+	// Type specifies the type of the application's source
+	// +kubebuilder:validation:Enum:=PlainYAML;Helm
+	Type ApplicationSourceType `json:"type"`
+	// Helm holds helm specific options
+	Helm *ApplicationSourceHelm `json:"helm,omitempty"`
 	// Token is a token for accessing the remote git server. It can be empty, if you don't want to register a webhook
 	// to the git server
 	Token *GitToken `json:"token,omitempty"`
@@ -110,8 +150,6 @@ func (source *ApplicationSource) GetAPIUrl() string {
 		panic(err)
 	}
 
-	fmt.Println(u.Host)
-
 	if u.Host == "github.com" {
 		return GithubDefaultAPIUrl
 	} else if u.Host == "gitlab.com" {
@@ -128,8 +166,6 @@ func (source *ApplicationSource) GetGitType() GitType {
 		panic(err)
 	}
 
-	fmt.Println(u.Host)
-
 	if u.Host == "github.com" {
 		return GitTypeGitHub
 	} else if u.Host == "gitlab.com" {
@@ -141,32 +177,31 @@ func (source *ApplicationSource) GetGitType() GitType {
 }
 
 type ApplicationDestination struct {
-	// Server specifies the URL of the target cluster and must be set to the Kubernetes control plane API
-	Server string `json:"server,omitempty"`
 	// Namespace specifies the target namespace for the application's resources.
 	// The namespace will only be set for namespace-scoped resources that have not set a value for .metadata.namespace
 	Namespace string `json:"namespace,omitempty"`
-	// Name is an alternate way of specifying the target cluster by its symbolic name
+	// Name specifies the target cluster's name. Do not enter any value if you want to deploy in current context.
 	Name string `json:"name,omitempty"`
 }
 
-// TODO
 // ApplicationSourceType specifies the type of the application's source
 type ApplicationSourceType string
 
 const (
 	ApplicationSourceTypePlainYAML ApplicationSourceType = "PlainYAML"
 	ApplicationSourceTypeHelm      ApplicationSourceType = "Helm"
-	ApplicationSourceTypeKustomize ApplicationSourceType = "Kustomize"
-	ApplicationSourceTypeKsonnet   ApplicationSourceType = "Ksonnet"
-	ApplicationSourceTypeDirectory ApplicationSourceType = "Directory"
-	ApplicationSourceTypePlugin    ApplicationSourceType = "Plugin"
+	//TODO - 아래의 SourceType 지원
+	//ApplicationSourceTypeKustomize ApplicationSourceType = "Kustomize"
+	//ApplicationSourceTypeKsonnet   ApplicationSourceType = "Ksonnet"
+	//ApplicationSourceTypeDirectory ApplicationSourceType = "Directory"
+	//ApplicationSourceTypePlugin    ApplicationSourceType = "Plugin"
 )
 
-const (
-	ConfigMapNameCDConfig      = "cd-config"
-	ConfigMapNamespaceCDSystem = "cd-system"
-)
+// ApplicationSourceHelm holds helm specific options
+type ApplicationSourceHelm struct {
+	ClonedRepoPath string `json:"clonedRepoPath,omitempty"`
+	ReleaseName    string `json:"releaseName,omitempty"`
+}
 
 func init() {
 	SchemeBuilder.Register(&Application{}, &ApplicationList{})
@@ -204,12 +239,11 @@ func (app *Application) GetToken(c client.Client) (string, error) {
 }
 
 // GetWebhookServerAddress returns Server address which webhook events will be received
-// TODO: modify to use config controller & expose controller
-func (app *Application) GetWebhookServerAddress(c client.Client) string {
-	cm := &corev1.ConfigMap{}
-	if err := c.Get(context.Background(), types.NamespacedName{Name: ConfigMapNameCDConfig, Namespace: ConfigMapNamespaceCDSystem}, cm); err != nil {
-		return ""
-	}
-	currentExternalHostName := cm.Data["externalHostName"]
-	return fmt.Sprintf("http://%s/webhook/%s/%s", currentExternalHostName, app.Namespace, app.Name)
+func (app *Application) GetWebhookServerAddress() string {
+	return fmt.Sprintf("http://%s/webhook/%s/%s", configs.CurrentExternalHostName, app.Namespace, app.Name)
 }
+
+// Approval API kinds
+const (
+	ApplicationAPISync = "sync"
+)

@@ -23,6 +23,7 @@ import (
 
 	"github.com/tmax-cloud/cd-operator/pkg/git"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -402,4 +403,18 @@ func DeleteLabel(repoName string, id int, label string) error {
 	}
 
 	return nil
+}
+
+// GetManifestInfos gets fake info
+func (c *Client) GetManifestInfos(path, revision string, manifestInfos []string) ([]string, error) {
+	// TODO
+	return nil, nil
+}
+
+// ObjectFromManifest returns unstructured objects from a raw manifest file
+func (c *Client) ObjectFromManifest(info, namespace string) ([]*unstructured.Unstructured, error) {
+	// TODO
+	var manifestRawObjs []*unstructured.Unstructured
+
+	return manifestRawObjs, nil
 }

@@ -1,144 +1,349 @@
 package manifestmanager
 
 import (
-	"io"
-	"net/http"
-	"net/http/httptest"
+	"context"
 	"os"
 	"testing"
 
-	"github.com/bmizerany/assert"
-	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 	cdv1 "github.com/tmax-cloud/cd-operator/api/v1"
+	"github.com/tmax-cloud/cd-operator/pkg/httpclient"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
-type getManifestURLTestCase struct {
-	repoURL        string
-	path           string
-	targetRevision string
+type getDeployResourceListTestCase struct {
+	app *cdv1.Application
 
-	expectedErrOccur bool
-	expectedErrMsg   string
-	expectedResult   []string
+	expectedListLength int
+	expectedErrOccur   bool
+	expectedErrMsg     string
 }
 
-func TestGetManifestURL(t *testing.T) {
-	// Set loggers
-	if os.Getenv("CD") != "true" {
+var testDeployList = &cdv1.DeployResourceList{
+	Items: []cdv1.DeployResource{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "application1-deployment-resource1-test",
+				Namespace: "default",
+				Labels:    map[string]string{"cd.tmax.io/application": "application1-default"},
+			},
+			Application: "application1",
+			Spec: cdv1.DeployResourceSpec{
+				APIVersion: "apps/v1",
+				Name:       "resource1",
+				Kind:       "Deployment",
+				Namespace:  "test",
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "application1-service-resource2-test",
+				Namespace: "default",
+				Labels:    map[string]string{"cd.tmax.io/application": "application1-default"},
+			},
+			Application: "application1",
+			Spec: cdv1.DeployResourceSpec{
+				APIVersion: "v1",
+				Name:       "resource2",
+				Kind:       "Service",
+				Namespace:  "test",
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "application2-service-resource3-test",
+				Namespace: "default",
+				Labels:    map[string]string{"cd.tmax.io/application": "application2-default"},
+			},
+			Application: "application1",
+			Spec: cdv1.DeployResourceSpec{
+				APIVersion: "v1",
+				Name:       "resource3",
+				Kind:       "Service",
+				Namespace:  "test",
+			},
+		},
+	},
+}
+
+func TestGetDeployResourceList(t *testing.T) {
+	if os.Getenv("CI") != "true" {
 		logrus.SetLevel(logrus.InfoLevel)
 		ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 	}
-	var m ManifestManager
-	// https://github.com/tmax-cloud/cd-operator.git
-	// api.github.com/repos/argoproj/argocd-example-apps/contents/guestbook/guestbook-ui-svc.yaml?ref=master
 
-	tc := map[string]getManifestURLTestCase{
-		"githubValidURL": {
-			repoURL:          "https://github.com/tmax-cloud/cd-example-apps",
-			path:             "guestbook",
-			targetRevision:   "main",
-			expectedErrOccur: false,
-			expectedResult:   []string{"https://raw.githubusercontent.com/tmax-cloud/cd-example-apps/main/guestbook/guestbook-ui-deployment.yaml", "https://raw.githubusercontent.com/tmax-cloud/cd-example-apps/main/guestbook/guestbook-ui-svc.yaml"},
+	tc := map[string]getDeployResourceListTestCase{
+		"app1": {
+			app: &cdv1.Application{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "application1",
+					Namespace: "default",
+				},
+			},
+			expectedListLength: 2,
+			expectedErrOccur:   false,
 		},
-		"githubInvalidURL": {
-			repoURL:          "https://github.com/tmax-cloud/cd-example-apps-fake",
-			path:             "guestbook",
-			targetRevision:   "main",
-			expectedErrOccur: true,
-			expectedErrMsg:   "404 Not Found",
+		"app2": {
+			app: &cdv1.Application{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "application2",
+					Namespace: "default",
+				},
+			},
+			expectedListLength: 1,
+			expectedErrOccur:   false,
 		},
-		// TODO: tc for gitlab & other apiURL
-		// "gitlabValidURL": {
-
-		// },
-		// "gitlabInvalidURL": {
-
-		// },
 	}
+
+	s := runtime.NewScheme()
+	utilruntime.Must(corev1.AddToScheme(s))
+	utilruntime.Must(cdv1.AddToScheme(s))
+
+	mockHTTPClient := &httpclient.MockHTTPClient{}
+	mockClient := fake.NewClientBuilder().WithLists(testDeployList).WithScheme(s).Build()
+	m := plainYamlManager{DefaultCli: mockClient, Context: context.Background(), HTTPClient: mockHTTPClient}
 
 	for name, c := range tc {
 		t.Run(name, func(t *testing.T) {
-			app := &cdv1.Application{
-				Spec: cdv1.ApplicationSpec{
-					Source: cdv1.ApplicationSource{
-						RepoURL:        c.repoURL,
-						Path:           c.path, // 아직 single yaml만 가능
-						TargetRevision: c.targetRevision,
-					},
-				},
-			}
-			result, err := m.GetManifestURLList(app)
+			deployList, err := getDeployResourceList(m.DefaultCli, c.app)
 			if c.expectedErrOccur {
-				require.Error(t, err)
 				require.Equal(t, c.expectedErrMsg, err.Error())
 			} else {
 				require.NoError(t, err)
-				require.Equal(t, c.expectedResult, result)
+				require.Equal(t, c.expectedListLength, len(deployList.Items))
 			}
 		})
 	}
 }
 
-func TestApplyManifest(t *testing.T) {
-	// Set loggers
-	if os.Getenv("CD") != "true" {
-		logrus.SetLevel(logrus.InfoLevel)
-		ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
-	}
+type updateDeployResourceTestCase struct {
+	unstObj *unstructured.Unstructured
 
-	s := runtime.NewScheme()
-	utilruntime.Must(cdv1.AddToScheme(s))
-	server := newTestServer()
-	app := &cdv1.Application{
-		Spec: cdv1.ApplicationSpec{
-			Source: cdv1.ApplicationSource{
-				RepoURL:        "https://github.com/tmax-cloud/cd-example-apps",
-				Path:           "guestbook/guestbook-ui-svc.yaml",
-				TargetRevision: "main",
+	expectedDeployResource *cdv1.DeployResource
+	expectedErrOccur       bool
+	expectedErrMsg         string
+}
+
+func TestUpdateDeployResource(t *testing.T) {
+	tc := map[string]updateDeployResourceTestCase{
+		"exist": {
+			unstObj: &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": "v1", "kind": "Service", "metadata": map[string]interface{}{"name": "exist-obj", "namespace": "test"}, "spec": map[string]interface{}{"ports": []interface{}{map[string]interface{}{"port": 80, "targetPort": 80}}, "selector": map[string]interface{}{"app": "guestbook-ui"}}}},
+
+			expectedDeployResource: &cdv1.DeployResource{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "DeployResource",
+					APIVersion: "cd.tmax.io/v1",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "application-service-exist-obj-test",
+					Namespace:       "default",
+					ResourceVersion: "999",
+					Labels:          map[string]string{"cd.tmax.io/application": "application-default"},
+				},
+				Application: "application",
+				Spec: cdv1.DeployResourceSpec{
+					APIVersion: "v1",
+					Name:       "exist-obj",
+					Kind:       "Service",
+					Namespace:  "test",
+				},
 			},
+			expectedErrOccur: false,
+		},
+		"create": {
+			unstObj: &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": "v1", "kind": "Service", "metadata": map[string]interface{}{"name": "new-obj", "namespace": "test"}, "spec": map[string]interface{}{"ports": []interface{}{map[string]interface{}{"port": 80, "targetPort": 80}}, "selector": map[string]interface{}{"app": "guestbook-ui"}}}},
+
+			expectedDeployResource: &cdv1.DeployResource{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "application-service-new-obj-test",
+					Namespace:       "default",
+					Labels:          map[string]string{"cd.tmax.io/application": "application-default"},
+					ResourceVersion: "1",
+				},
+				Application: "application",
+				Spec: cdv1.DeployResourceSpec{
+					APIVersion: "v1",
+					Name:       "new-obj",
+					Kind:       "Service",
+					Namespace:  "test",
+				},
+			},
+			expectedErrOccur: false,
 		},
 	}
 
-	fakeCli := fake.NewFakeClientWithScheme(s, app)
-	m := ManifestManager{Client: fakeCli}
-	err := m.ApplyManifest(server.URL, app)
+	app := &cdv1.Application{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "application",
+			Namespace: "default",
+		},
+	}
 
-	//TODO : 아웃풋인 DeployResource을 활용해서 Test 짜기
-	assert.Equal(t, err, nil)
+	testDeployResource := &cdv1.DeployResource{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "application-service-exist-obj-test",
+			Namespace: "default",
+			Labels:    map[string]string{"cd.tmax.io/application": "application-default"},
+		},
+		Application: "application",
+		Spec: cdv1.DeployResourceSpec{
+			APIVersion: "v1",
+			Name:       "exist-obj",
+			Kind:       "Service",
+			Namespace:  "test",
+		},
+	}
+
+	s := runtime.NewScheme()
+	utilruntime.Must(corev1.AddToScheme(s))
+	utilruntime.Must(cdv1.AddToScheme(s))
+
+	mockClient := fake.NewClientBuilder().WithLists(testDeployList).WithObjects(app, testDeployResource).WithScheme(s).Build()
+
+	for name, c := range tc {
+		t.Run(name, func(t *testing.T) {
+			deployResource, err := updateDeployResource(mockClient, c.unstObj, app)
+			if !c.expectedErrOccur {
+				require.NoError(t, err)
+				require.Equal(t, c.expectedDeployResource, deployResource)
+				err := mockClient.Get(context.Background(), types.NamespacedName{Namespace: c.expectedDeployResource.Namespace, Name: c.expectedDeployResource.Name}, c.expectedDeployResource)
+				require.NoError(t, err)
+			} else {
+				require.Equal(t, c.expectedErrMsg, err.Error())
+			}
+		})
+	}
 }
 
-func newTestServer() *httptest.Server {
-	router := mux.NewRouter()
+type deleteDeployResourceTestCase struct {
+	deployResource *cdv1.DeployResource
 
-	router.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
-		defer func() {
-			_ = req.Body.Close()
-		}()
-		// yaml은 tab 말고 space로만 구문 가능
-		data := `apiVersion: v1
-kind: Service
-metadata:
-  name: guestbook-ui-test
-spec:
-  ports:
-  - port: 80
-    targetPort: 80
-  selector:
-    app: guestbook-ui
+	expectedErrOccur bool
+	expectedErrMsg   string
+}
 
-`
-		_, err := io.WriteString(w, data)
-		if err != nil {
-			return
-		}
-	})
+func TestDeleteDeployResource(t *testing.T) {
+	tc := map[string]deleteDeployResourceTestCase{
+		"drsExist": {
+			deployResource: &cdv1.DeployResource{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "application-service-exist-drs-test",
+					Namespace:       "default",
+					Labels:          map[string]string{"cd.tmax.io/application": "application-default"},
+					ResourceVersion: "1",
+				},
+				Application: "application",
+				Spec: cdv1.DeployResourceSpec{
+					APIVersion: "v1",
+					Name:       "exist-drs",
+					Kind:       "Service",
+					Namespace:  "test",
+				},
+			},
+			expectedErrOccur: false,
+		},
+		"noDrsExist": {
+			deployResource: &cdv1.DeployResource{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "application-service-no-drs-test",
+					Namespace:       "default",
+					Labels:          map[string]string{"cd.tmax.io/application": "application-default"},
+					ResourceVersion: "1",
+				},
+				Application: "application",
+				Spec: cdv1.DeployResourceSpec{
+					APIVersion: "v1",
+					Name:       "no-drs",
+					Kind:       "Service",
+					Namespace:  "test",
+				},
+			},
+			expectedErrOccur: true,
+			expectedErrMsg:   `deployresources.cd.tmax.io "application-service-no-drs-test" not found`,
+		},
+		"noObjExist": {
+			deployResource: &cdv1.DeployResource{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "application-service-no-obj-test",
+					Namespace:       "default",
+					Labels:          map[string]string{"cd.tmax.io/application": "application-default"},
+					ResourceVersion: "1",
+				},
+				Application: "application",
+				Spec: cdv1.DeployResourceSpec{
+					APIVersion: "v1",
+					Name:       "no-obj",
+					Kind:       "Service",
+					Namespace:  "test",
+				},
+			},
+			expectedErrOccur: false,
+		},
+	}
 
-	return httptest.NewServer(router)
+	s := runtime.NewScheme()
+	utilruntime.Must(corev1.AddToScheme(s))
+	utilruntime.Must(cdv1.AddToScheme(s))
+
+	for name, c := range tc {
+		t.Run(name, func(t *testing.T) {
+			testDeployResource1 := &cdv1.DeployResource{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "application-service-exist-drs-test",
+					Namespace: "default",
+					Labels:    map[string]string{"cd.tmax.io/application": "application-default"},
+				},
+				Application: "application",
+				Spec: cdv1.DeployResourceSpec{
+					APIVersion: "v1",
+					Name:       "exist-drs",
+					Kind:       "Service",
+					Namespace:  "test",
+				},
+			}
+			testDeployResource2 := &cdv1.DeployResource{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "application-service-no-obj-test",
+					Namespace: "default",
+					Labels:    map[string]string{"cd.tmax.io/application": "application-default"},
+				},
+				Application: "application",
+				Spec: cdv1.DeployResourceSpec{
+					APIVersion: "v1",
+					Name:       "no-obj",
+					Kind:       "Service",
+					Namespace:  "test",
+				},
+			}
+			testDeployedObject := &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "exist-drs",
+					Namespace: "test",
+				},
+			}
+			mockClient := fake.NewClientBuilder().WithLists(testDeployList).WithObjects(testDeployResource1, testDeployResource2, testDeployedObject).WithScheme(s).Build()
+
+			err := deleteDeployResource(mockClient, c.deployResource)
+
+			if !c.expectedErrOccur {
+				require.NoError(t, err)
+				err := mockClient.Get(context.Background(), types.NamespacedName{Namespace: c.deployResource.Namespace, Name: c.deployResource.Name}, c.deployResource)
+				require.True(t, errors.IsNotFound(err))
+				err = mockClient.Get(context.Background(), types.NamespacedName{Namespace: c.deployResource.Spec.Namespace, Name: c.deployResource.Spec.Name}, &corev1.Service{})
+				require.True(t, errors.IsNotFound(err))
+			} else {
+				require.Equal(t, c.expectedErrMsg, err.Error())
+			}
+		})
+	}
 }

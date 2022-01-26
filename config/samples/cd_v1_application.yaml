@@ -2,6 +2,13 @@ apiVersion: cd.tmax.io/v1
 kind: Application
 metadata:
   name: application-sample
+  namespace: default
 spec:
-  # Add fields here
-  foo: bar
+  source:
+    repoURL: "https://github.com/tmax-cloud/cd-example-apps"
+    path: "guestbook"
+    targetRevision: "main"
+  destination:
+    namespace: default
+  syncPolicy:
+    autosync: true
